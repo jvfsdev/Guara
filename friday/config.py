@@ -65,6 +65,7 @@ class Config:
     web_port: int = 8765
     public_url: str = ""               # URL do tailscale funnel
     intake_token: str = ""             # protege o webhook /intake
+    aviso_token: str = ""              # protege o webhook /aviso (avisos de outros sistemas)
     twilio_sid: str = ""
     twilio_token: str = ""
     twilio_from: str = ""
@@ -155,6 +156,7 @@ def load_config() -> Config:
         web_port=int((raw.get("web") or {}).get("port", 8765)),
         public_url=str((raw.get("web") or {}).get("public_url", "") or "").rstrip("/"),
         intake_token=os.getenv("INTAKE_TOKEN", "").strip(),
+        aviso_token=os.getenv("AVISO_TOKEN", "").strip(),
         twilio_sid=os.getenv("TWILIO_ACCOUNT_SID", "").strip(),
         twilio_token=os.getenv("TWILIO_AUTH_TOKEN", "").strip(),
         twilio_from=os.getenv("TWILIO_FROM_NUMBER", "").strip(),

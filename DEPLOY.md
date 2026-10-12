@@ -386,6 +386,21 @@ trabalha no Mac, abre o editor com as alterações prontas para você revisar
 (sem commit) e ainda deixa um rascunho de resposta ao cliente (que só sai com
 a sua confirmação).
 
+## 15. Avisos de outros sistemas da casa
+
+Para algo da casa (a lava e seca, um script, uma automação) mandar um aviso
+pronto, que chega como está, sem passar pelo cérebro:
+
+```bash
+curl -X POST http://<ip-do-servidor>:8765/aviso \
+  -H "X-Jarvis-Token: <AVISO_TOKEN do .env>" -H "Content-Type: application/json" \
+  -d '{"texto": "A roupa secou.", "urgencia": "normal"}'
+```
+
+`urgencia`: `normal` (só Telegram; no horário de silêncio espera a manhã),
+`high` (também notifica o celular) ou `critical` (notificação que fura o modo
+silencioso do celular). Com o não perturbe ligado, tudo vira mensagem normal.
+
 ## Resumo do que o Guará ganha em cada passo
 
 | Passo | Ele passa a conseguir |

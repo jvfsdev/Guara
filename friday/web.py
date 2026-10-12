@@ -1,8 +1,9 @@
 """Servidor web interno do Guará.
 
-Atende os webhooks da Twilio (ligações) e um endpoint genérico de entrada
-para sistemas de suporte. Não fica exposto direto: quem publica é o
-`tailscale funnel`, então nenhuma porta do roteador precisa ser aberta.
+Atende os webhooks da Twilio (ligações), um endpoint genérico de entrada
+para sistemas de suporte e um de avisos prontos de outros sistemas da casa.
+Não fica exposto direto: quem publica é o `tailscale funnel`, então nenhuma
+porta do roteador precisa ser aberta.
 """
 
 from __future__ import annotations
@@ -16,14 +17,16 @@ log = logging.getLogger("friday.web")
 
 
 class WebServer:
-    def __init__(self, config, phone=None, on_intake=None):
+    def __init__(self, config, phone=None, on_intake=None, on_aviso=None):
         self.config = config
         self.phone = phone
         self.on_intake = on_intake      # async (payload: dict) -> None
+        self.on_aviso = on_aviso        # async (texto: str, urgencia: str) -> None
         self.app = web.Application()
         self.app.add_routes([
             web.get("/health", self.health),
             web.post("/intake", self.intake),
+            web.post("/aviso", self.aviso),
             web.post("/twilio/voice", self.twilio_voice),
             web.post("/twilio/gather", self.twilio_gather),
         ])
@@ -58,6 +61,29 @@ class WebServer:
         log.info("entrada recebida via /intake")
         if self.on_intake:
             await self.on_intake(payload)
+        return web.json_response({"recebido": True})
+
+    async def aviso(self, request):
+        """Aviso pronto de outro sistema (ex.: a lava e seca), entregue como está.
+
+        Corpo: {"texto": "...", "urgencia": "normal" | "high" | "critical"}.
+        """
+        token = request.headers.get("X-Jarvis-Token") or request.query.get("token", "")
+        if not self.config.aviso_token or not hmac.compare_digest(token, self.config.aviso_token):
+            return web.json_response({"erro": "token inválido"}, status=401)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"erro": "JSON inválido"}, status=400)
+        if not isinstance(payload, dict):
+            return web.json_response({"erro": "o corpo precisa ser um objeto JSON"}, status=400)
+        texto = str(payload.get("texto", "")).strip()[:2000]
+        urgencia = payload.get("urgencia", "normal")
+        if not texto or urgencia not in ("normal", "high", "critical"):
+            return web.json_response({"erro": "texto vazio ou urgência inválida"}, status=400)
+        log.info("aviso recebido via /aviso (%s)", urgencia)
+        if self.on_aviso:
+            await self.on_aviso(texto, urgencia)
         return web.json_response({"recebido": True})
 
     async def _validar_twilio(self, request) -> bool:

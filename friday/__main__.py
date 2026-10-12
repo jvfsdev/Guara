@@ -193,7 +193,7 @@ async def run_telegram(config):
             handler=_ligar,
         )
 
-    if config.public_url or config.intake_token:
+    if config.public_url or config.intake_token or config.aviso_token:
         from .web import WebServer
 
         servidor = WebServer(
@@ -201,6 +201,7 @@ async def run_telegram(config):
             on_intake=lambda payload: pipelines["reclamacao"].processar(
                 json.dumps(payload, ensure_ascii=False)[:6000], origem="sistema de suporte"
             ),
+            on_aviso=lambda texto, urgencia: notifier.send(texto, urgency=urgencia),
         )
         await servidor.start()
 
