@@ -1,14 +1,17 @@
 """A voz do Guará, com motores plugáveis.
 
 Medido no servidor (AMD E-300, sem AVX/SSE4.2), por frase:
-  edge   ~1,4s  neural, natural, precisa de internet
-  espeak ~0,2s  robótica, offline, instantânea
-  piper  ~13s   natural e offline, mas inviável nesse CPU (inferência
+  edge   ~1,4s  neural (Microsoft), natural, precisa de internet
+  gemini ~4-6s  neural (Google), a mais natural, usa a cota do Gemini
+  espeak ~0,2s  offline e instantânea; com a voz MBROLA brasileira
+                instalada (mbrola-br3) fica bem mais compreensível
+  piper  ~11s   natural e offline, mas inviável nesse CPU (inferência
                 neural sem instruções vetoriais); mantida para máquinas
                 melhores e como último recurso
 
-`auto` (padrão) usa edge e cai para espeak se a rede falhar — o chefe nunca
-fica sem resposta falada.
+`auto` (padrão) é uma escada: edge → gemini → espeak. Duas empresas
+diferentes na nuvem dificilmente caem juntas, e sem internet nenhuma ainda
+sobra a voz offline — o chefe nunca fica sem resposta falada.
 
 Para a sala o que importa é `speak_streaming`: divide a resposta em frases e
 começa a falar a primeira enquanto sintetiza as seguintes.
@@ -47,10 +50,12 @@ _voice_cache: dict[str, object] = {}
 # Quando a voz da nuvem cai e ele passa a falar com a de emergência, o chefe
 # precisa saber — em out/2026 isso passou um mês despercebido. Uma vez por dia.
 ao_degradar = None              # async (texto) -> None, ligado pelo __main__
+EDGE_ESPERA = 300               # s sem tentar a edge depois de uma falha
+_edge_falhou_em = -1e9
 AVISO_DEGRADADA = ROOT / "state" / "tts_aviso_degradada"
 
 
-def _avisar_degradada(exc: Exception):
+def _avisar_degradada(exc: Exception, qual: str):
     try:
         if not ao_degradar or time.time() - AVISO_DEGRADADA.stat().st_mtime < 86400:
             return
@@ -60,9 +65,9 @@ def _avisar_degradada(exc: Exception):
         AVISO_DEGRADADA.parent.mkdir(parents=True, exist_ok=True)
         AVISO_DEGRADADA.touch()
         asyncio.get_running_loop().create_task(ao_degradar(
-            f"🔈 A voz da nuvem falhou ({type(exc).__name__}) e estou falando na sala com a voz "
-            "de emergência, a robótica. Se continuar, provavelmente é o edge-tts que precisa "
-            "de atualização: pip install -U edge-tts."))
+            f"🔈 A voz da Microsoft falhou ({type(exc).__name__}) e estou falando com {qual}. "
+            "Se continuar, provavelmente é o edge-tts que precisa de atualização: "
+            "pip install -U edge-tts."))
     except Exception:
         log.exception("não consegui avisar que a voz caiu para a de emergência")
 
@@ -102,16 +107,70 @@ async def _run(*args) -> int:
     return await proc.wait()
 
 
+def _voz_mbrola() -> str | None:
+    """Voz MBROLA brasileira instalada (sudo apt install mbrola mbrola-br3)?"""
+    if not shutil.which("mbrola"):
+        return None
+    for v in ("br3", "br1", "br4", "br2"):
+        if Path(f"/usr/share/mbrola/{v}/{v}").exists() or Path(f"/usr/share/mbrola/{v}").is_file():
+            return f"mb-{v}"
+    return None
+
+
 async def _espeak_wav(text: str) -> Path:
     binario = shutil.which("espeak-ng") or shutil.which("espeak")
     if not binario:
         raise RuntimeError("espeak-ng não instalado")
     out = Path(tempfile.mkstemp(suffix=".wav", prefix="jarvis_voz_")[1])
-    velocidade = str(_settings().get("espeak_speed", 165))
-    if await _run(binario, "-v", "pt-br", "-s", velocidade, "-w", str(out), text) != 0:
-        out.unlink(missing_ok=True)
-        raise RuntimeError("espeak falhou")
-    return out
+    # mais devagar que o padrão: na voz de emergência, entender vale mais que pressa
+    velocidade = str(_settings().get("espeak_speed", 150))
+    mbrola = _voz_mbrola()
+    for voz in ([mbrola] if mbrola else []) + ["pt-br"]:
+        if await _run(binario, "-v", voz, "-s", velocidade, "-w", str(out), text) == 0 and out.stat().st_size > 1000:
+            return out
+        log.warning("espeak com a voz %s falhou", voz)
+    out.unlink(missing_ok=True)
+    raise RuntimeError("espeak falhou")
+
+
+_gemini_clientes: dict[str, object] = {}
+
+
+async def _gemini_wav(text: str) -> Path:
+    """A voz do Gemini (Google): segundo degrau, de outra empresa que a edge.
+    Tenta cada chave configurada; cota esgotada numa passa para a próxima."""
+    from google import genai
+    from google.genai import types
+
+    from .config import load_config
+
+    cfg = _settings()
+    modelo = cfg.get("gemini_tts_model", "gemini-2.5-flash-preview-tts")
+    pedido = f"Diga, em português do Brasil, com naturalidade e um tom seco e levemente irônico: {text}"
+    config = types.GenerateContentConfig(
+        response_modalities=["AUDIO"],
+        speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
+            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=cfg.get("gemini_voice", "Charon")))),
+    )
+    ultimo: Exception = RuntimeError("nenhuma chave do Gemini configurada")
+    for chave in load_config().gemini_api_keys:
+        cliente = _gemini_clientes.setdefault(chave, genai.Client(api_key=chave))
+        try:
+            r = await asyncio.wait_for(cliente.aio.models.generate_content(
+                model=modelo, contents=pedido, config=config), timeout=25)
+            parte = r.candidates[0].content.parts[0].inline_data
+        except Exception as exc:
+            ultimo = exc
+            continue
+        taxa = int((re.search(r"rate=(\d+)", parte.mime_type or "") or [0, 24000])[1])
+        out = Path(tempfile.mkstemp(suffix=".wav", prefix="jarvis_voz_")[1])
+        with wave.open(str(out), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(taxa)
+            w.writeframes(parte.data)
+        return out
+    raise ultimo
 
 
 async def _edge_audio(text: str) -> Path:
@@ -194,15 +253,29 @@ async def synthesize(text: str, voice: str | None = None) -> Path:
     if voice:  # voz explícita = Piper (usada em comparações)
         return await asyncio.to_thread(_synthesize_sync, text, voice)
 
+    global _edge_falhou_em
     if motor in ("auto", "edge"):
+        erro_edge: Exception | None = None
+        # caiu há pouco? não perde tempo tentando de novo a cada frase
+        if motor == "edge" or time.monotonic() - _edge_falhou_em > EDGE_ESPERA:
+            try:
+                return await _edge_audio(text)
+            except Exception as exc:
+                if motor == "edge":
+                    raise
+                _edge_falhou_em, erro_edge = time.monotonic(), exc
+                log.warning("voz da Microsoft indisponível (%s) — tentando a do Gemini", type(exc).__name__)
         try:
-            return await _edge_audio(text)
+            caminho = await _gemini_wav(text)
+            if erro_edge:
+                _avisar_degradada(erro_edge, "a voz do Gemini")
+            return caminho
         except Exception as exc:
-            if motor == "edge":
-                raise
-            log.warning("voz da nuvem indisponível (%s) — usando espeak", type(exc).__name__)
-            _avisar_degradada(exc)
+            log.warning("voz do Gemini também falhou (%s) — usando a de emergência", type(exc).__name__)
+            _avisar_degradada(erro_edge or exc, "a voz de emergência, offline")
             return await _espeak_wav(text)
+    if motor == "gemini":
+        return await _gemini_wav(text)
     if motor == "espeak":
         return await _espeak_wav(text)
     return await asyncio.to_thread(_synthesize_sync, text, voice_id())

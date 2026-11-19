@@ -216,6 +216,17 @@ docker run -d --name homeassistant --restart=unless-stopped \
 
 **Outro nome?** Treine o seu: [scripts/palavra/LEIAME.md](scripts/palavra/LEIAME.md).
 
+**A voz dele** é uma escada: a da Microsoft (edge-tts, rápida), depois a do
+Gemini (outra empresa, ~4 s por frase, usa a cota do Gemini) e, sem internet,
+a offline (espeak). Se cair da primeira, ele avisa no Telegram uma vez por
+dia. Para a voz offline ficar compreensível, instale a voz brasileira MBROLA,
+que pesa quase nada:
+```bash
+echo "deb http://deb.debian.org/debian/ trixie contrib non-free" | sudo tee /etc/apt/sources.list.d/mbrola.list
+sudo apt update && sudo apt install -y mbrola mbrola-br3
+```
+(Troque `trixie` pela versão do seu Debian. Ele passa a usá-la sozinho.)
+
 ## 9b. Rosto na tela (pygame, sem navegador)
 
 O rosto do Guará renderizado nativamente (~50 MB de RAM — feito para o
