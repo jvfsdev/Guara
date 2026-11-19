@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import wave
 from pathlib import Path
 
@@ -42,6 +43,28 @@ MIN_CHUNK = 25
 MAX_CHUNK = 240
 
 _voice_cache: dict[str, object] = {}
+
+# Quando a voz da nuvem cai e ele passa a falar com a de emergência, o chefe
+# precisa saber — em out/2026 isso passou um mês despercebido. Uma vez por dia.
+ao_degradar = None              # async (texto) -> None, ligado pelo __main__
+AVISO_DEGRADADA = ROOT / "state" / "tts_aviso_degradada"
+
+
+def _avisar_degradada(exc: Exception):
+    try:
+        if not ao_degradar or time.time() - AVISO_DEGRADADA.stat().st_mtime < 86400:
+            return
+    except FileNotFoundError:
+        pass
+    try:
+        AVISO_DEGRADADA.parent.mkdir(parents=True, exist_ok=True)
+        AVISO_DEGRADADA.touch()
+        asyncio.get_running_loop().create_task(ao_degradar(
+            f"🔈 A voz da nuvem falhou ({type(exc).__name__}) e estou falando na sala com a voz "
+            "de emergência, a robótica. Se continuar, provavelmente é o edge-tts que precisa "
+            "de atualização: pip install -U edge-tts."))
+    except Exception:
+        log.exception("não consegui avisar que a voz caiu para a de emergência")
 
 
 def available() -> bool:
@@ -178,6 +201,7 @@ async def synthesize(text: str, voice: str | None = None) -> Path:
             if motor == "edge":
                 raise
             log.warning("voz da nuvem indisponível (%s) — usando espeak", type(exc).__name__)
+            _avisar_degradada(exc)
             return await _espeak_wav(text)
     if motor == "espeak":
         return await _espeak_wav(text)

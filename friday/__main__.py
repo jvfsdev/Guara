@@ -119,6 +119,9 @@ async def run_telegram(config):
     tools[scheduler.reminder_tool().declaration["name"]] = scheduler.reminder_tool()
     scheduler.start()
     notifier.attach(scheduler.scheduler)
+    from . import tts
+
+    tts.ao_degradar = lambda texto: notifier.send(texto)
 
     # clima e agenda para a tela de repouso do rosto
     from datetime import datetime, timedelta
