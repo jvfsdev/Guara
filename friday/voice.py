@@ -26,6 +26,10 @@ log = logging.getLogger("friday.voice")
 
 RATE = 16000
 CHUNK = 1280  # 80 ms — tamanho que o openWakeWord espera
+# Num processador fraco o detector gasta quase os 80 ms de cada bloco; qualquer
+# outra carga o deixa para trás. A fila guarda no máximo ~2 s e, cheia, joga
+# fora o áudio MAIS VELHO: melhor perder o passado que acordar 8 s atrasado.
+FILA_MAX = 25
 
 
 BEEP_FILE = ROOT / "state" / "wake_beep.wav"
@@ -142,13 +146,19 @@ class VoiceLoop:
             wake = WakeModel(wakeword_models=["hey_jarvis"], inference_framework="onnx")
             chave, falada = "hey_jarvis", "hey jarvis"
         loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
+        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=FILA_MAX)
+        perdidos = [0]                  # blocos descartados desde o último aviso no log
+
+        def enfileirar(data: bytes):    # roda no loop, nunca na thread do áudio
+            if queue.full():
+                queue.get_nowait()
+                perdidos[0] += 1
+            queue.put_nowait(data)
 
         def on_audio(indata, frames, t, status):
-            data = bytes(indata)
             try:
-                loop.call_soon_threadsafe(queue.put_nowait, data)
-            except RuntimeError:
+                loop.call_soon_threadsafe(enfileirar, bytes(indata))
+            except RuntimeError:        # loop já fechado (desligando)
                 pass
 
         stream = sd.RawInputStream(
@@ -166,10 +176,15 @@ class VoiceLoop:
         anteriores: deque = deque(maxlen=int(2.5 * RATE / CHUNK))   # últimos 2,5 s
         ultimo_registro = 0.0
         corrida = 0
+        ultimo_aviso_atraso = time.monotonic()
         with stream:
             self._set("idle")
             while True:
                 chunk = await queue.get()
+                if perdidos[0] and time.monotonic() - ultimo_aviso_atraso > 60:
+                    log.warning("escuta atrasada: %d blocos de áudio (%.1f s) descartados — CPU no limite",
+                                perdidos[0], perdidos[0] * CHUNK / RATE)
+                    perdidos[0], ultimo_aviso_atraso = 0, time.monotonic()
                 dados = np.frombuffer(chunk, dtype=np.int16)
                 rms = float(np.sqrt(np.mean(dados.astype(np.float64) ** 2)))
                 piso_ruido = rms if piso_ruido == 0 else 0.97 * piso_ruido + 0.03 * rms
@@ -210,6 +225,7 @@ class VoiceLoop:
                 except Exception:
                     log.exception("interação por voz falhou")
                 self._drain(queue)  # descarta o que o mic pegou da própria fala
+                perdidos[0] = 0     # enquanto ele pensava e falava, perder áudio é esperado
                 self._set("idle")
 
     async def _record_utterance(self, queue, np, limiar: float) -> bytes | None:
