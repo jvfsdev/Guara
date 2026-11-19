@@ -116,6 +116,7 @@ class Face:
         self._textos: dict = {}
         self.estado, self.anterior, self.t_troca = "idle", "idle", -10.0
         self._caption_vista = ""
+        self._ultima_tela = None       # o que está na tela parada (repouso/noite)
 
     # ------------------------------------------------------------ fontes
     def fonte(self, peso: str, tam: int):
@@ -310,7 +311,8 @@ class Face:
         else:
             self.noite()
 
-    def quadro(self, dados: dict, t: float):
+    def quadro(self, dados: dict, t: float) -> tuple[int, bool]:
+        """Desenha se precisar; devolve (fps, desenhou)."""
         estado = dados.get("state", "idle")
         # Estado velho demais = processo que o publicou já era; volta ao repouso.
         if estado != "idle" and time.time() - dados.get("updated_at", 0) > 90 and not self.demo:
@@ -325,6 +327,20 @@ class Face:
             self._caption_vista = dados.get("caption", "")
 
         dt = t - self.t_troca
+        # Parado (repouso/noite), a tela só muda com o minuto, a piscadela e os
+        # dados do HUD. Sem mudança, nem redesenha: o processador fica para
+        # quem ouve a sala.
+        animando = dt < VARRE + ENTRA + .2 or self.estado in ("listening", "thinking", "speaking")
+        if animando:
+            self._ultima_tela = None
+        else:
+            agora = datetime.now(ZoneInfo(self.config.timezone)).strftime("%H:%M")
+            piscando = self.estado == "idle" and t % PISCA_A_CADA < .14
+            tela = (self.estado, agora, piscando, int(t // 30),       # a cada 30 s redesenha de qualquer jeito
+                    repr(sorted(dados.get("hud", {}).items())))
+            if tela == self._ultima_tela:
+                return 8, False
+            self._ultima_tela = tela
         mesmo_fundo = FUNDO[self.anterior] == FUNDO[self.estado]
         if dt < VARRE and not mesmo_fundo:
             self.cena(self.anterior, t, 1.0, dados)
@@ -333,8 +349,9 @@ class Face:
         else:
             atraso = 0 if mesmo_fundo else VARRE
             self.cena(self.estado, t, prog(dt, atraso, atraso + ENTRA), dados)
-        # animando? quadros cheios; repouso parado? poucos, poupa o Bobcat
-        return 30 if (dt < VARRE + ENTRA + .2 or self.estado in ("listening", "thinking", "speaking")) else 8
+        # animando: 24 quadros bastam para o movimento; parado: 8 consultas por
+        # segundo, para não perder a piscadela (que dura 0,14 s)
+        return (24 if animando else 8), True
 
     def run(self):
         pg = self.pg
@@ -352,8 +369,9 @@ class Face:
             dados = face_state.read()
             if self.demo:
                 dados["hud"] = {**DEMO_HUD, **dados.get("hud", {})}
-            fps = self.quadro(dados, time.monotonic())
-            pg.display.flip()
+            fps, desenhou = self.quadro(dados, time.monotonic())
+            if desenhou:
+                pg.display.flip()
             self.clock.tick(fps)
 
     def fotos(self, pasta: str):
